@@ -1,18 +1,73 @@
 import tkinter as tk
 from tkinter import filedialog
+import os
+import sys
 import pytesseract
 import cv2
 import re
 import requests
-import base64
 from gtts import gTTS
 import pygame
+import time
+
+def load_dotenv(path=".env"):
+    if not os.path.exists(path):
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as e:
+        print("⚠ Could not read .env:", e)
+
+
+load_dotenv()
 
 # 🔴 Tesseract Path
 pytesseract.pytesseract.tesseract_cmd = r"C:\Tesseract-OCR\tesseract.exe"
 
-# 🔴 ADD NEW BHASHINI KEY (REGENERATE)
-BHASHINI_API_KEY = "your_api"
+# 🔴 OPENROUTER API KEY
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+
+def check_openrouter_key():
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost",
+        "X-Title": "OCR LLM Project"
+    }
+    data = {
+        "model": "openrouter/auto",
+        "messages": [{"role": "user", "content": "Reply only with: OK"}],
+        "max_tokens": 5,
+    }
+
+    if not OPENROUTER_API_KEY:
+        print("❌ OPENROUTER_API_KEY not set")
+        return False
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=15)
+        if response.status_code == 200:
+            print("✅ OpenRouter key is working")
+            return True
+
+        print(f"❌ OpenRouter key check failed ({response.status_code})")
+        print(response.text)
+        return False
+    except Exception as e:
+        print("❌ Key check error:", e)
+        return False
 
 
 # -------------------------------
@@ -39,14 +94,14 @@ def preprocess_image(path):
 
 
 # -------------------------------
-# 3. OCR (Tamil + English)
+# 3. OCR
 # -------------------------------
 def extract_text(image):
     return pytesseract.image_to_string(image, lang='eng+tam')
 
 
 # -------------------------------
-# 4. Clean Text (Tamil SAFE)
+# 4. Clean Text
 # -------------------------------
 def clean_text(text):
     text = re.sub(r'[^\u0B80-\u0BFFA-Za-z0-9.,!? ]+', '', text)
@@ -55,92 +110,76 @@ def clean_text(text):
 
 
 # -------------------------------
-# 5. Page Detection
+# 5. LLM SUMMARY (OpenRouter)
 # -------------------------------
-def is_acknowledgement(text):
-    keywords = ["acknowledgement", "thanks", "gratitude", "dedicated"]
-    return any(word in text.lower() for word in keywords)
+def llm_summary(text):
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost",
+        "X-Title": "OCR LLM Project"
+    }
+
+    prompt = f"""
+Summarize the following text clearly and shortly.
+If the text is Tamil, keep summary in Tamil.
+
+Text:
+{text}
+"""
+
+    data = {
+        "model": "openrouter/auto",   # 🔥 FIXED
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 150
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=20)
+
+        if response.status_code != 200:
+            print("❌ LLM API Error:", response.text)
+            return None
+
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        print("❌ LLM Error:", str(e))
+        return None
 
 # -------------------------------
-# 6. Summary
+# 6. Basic Summary (Fallback)
 # -------------------------------
-def summarize(text):
+def basic_summary(text):
     sentences = text.split('.')
-    summary = '.'.join(sentences[:2])   # 🔥 reduce size
-    return summary[:300]  # 🔥 max 300 chars
+    summary = '.'.join(sentences[:2])
+    return summary[:300]
+
 
 # -------------------------------
-# 7. Detect Language (Tamil Safe)
+# 7. Language Detection
 # -------------------------------
 def detect_language(text):
-    # Tamil Unicode range check
     if any('\u0B80' <= c <= '\u0BFF' for c in text):
         return "ta"
     return "en"
 
 
 # -------------------------------
-# 8A. gTTS (English)
+# 8. Text to Speech
 # -------------------------------
-def gtts_audio(text):
+def generate_audio(text, lang):
     file = "output.mp3"
-    gTTS(text=text, lang='en').save(file)
-    return file
-
-
-# -------------------------------
-# 8B. BHASHINI TTS
-# -------------------------------
-def bhashini_tts(text):
-    url = "https://dhruva-api.bhashini.gov.in/services/inference/pipeline"
-
-    headers = {
-        "Authorization": BHASHINI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    data = {
-        "pipelineTasks": [
-            {
-                "taskType": "tts",
-                "config": {
-                    "language": {
-                        "sourceLanguage": "ta"
-                    },
-                    "audioConfig": {
-                        "samplingRate": 16000
-                    }
-                }
-            }
-        ],
-        "inputData": {
-            "input": [
-                {"source": text}
-            ]
-        }
-    }
-
     try:
-        response = requests.post(url, headers=headers, json=data)
-
-        if response.status_code != 200:
-            print("❌ API Error:", response.text)
-            return None
-
-        result = response.json()
-
-        audio_base64 = result['pipelineResponse'][0]['audio'][0]['audioContent']
-        audio_bytes = base64.b64decode(audio_base64)
-
-        file = "output.wav"
-        with open(file, "wb") as f:
-            f.write(audio_bytes)
-
+        gTTS(text=text, lang=lang).save(file)
         return file
-
     except Exception as e:
-        print("❌ Bhashini Error:", e)
+        print("❌ Audio Error:", e)
         return None
 
 
@@ -154,7 +193,7 @@ def play_audio(file):
     pygame.mixer.music.play()
 
     while pygame.mixer.music.get_busy():
-        continue
+        time.sleep(0.5)
 
 
 # -------------------------------
@@ -178,43 +217,33 @@ def main():
     clean = clean_text(text)
     print("\n🧹 Clean Text:\n", clean)
 
-    # Page type
-    if is_acknowledgement(clean):
-        print("\n📌 Acknowledgement Page Detected")
-        final_text = clean
-    else:
-        print("\n✂ Generating Summary...")
-        final_text = summarize(clean)
+    print("\n🧠 Generating Smart Summary (LLM)...")
+    final_text = llm_summary(clean)
 
-    print("\n📝 Final Text:\n", final_text)
+    # 🔥 fallback
+    if not final_text:
+        print("⚠ LLM failed, using basic summary")
+        final_text = basic_summary(clean)
 
-    # Language detect
+    print("\n📝 Final Summary:\n", final_text)
+
     lang = detect_language(final_text)
     print("\n🌍 Language:", lang)
 
-    # Audio
-    if lang == "en":
-        print("🔊 Using gTTS")
-        audio_file = gtts_audio(final_text)
+    audio_file = generate_audio(final_text, lang)
 
-    else:
-        print("🔊 Using Bhashini (Tamil)")
-        audio_file = bhashini_tts(final_text)
-
-    # 🔥 FALLBACK if Bhashini fails
-        if audio_file is None:
-            print("⚠ Bhashini failed, using gTTS fallback")
-            audio_file = gtts_audio(final_text)
-    # Safe play
     if audio_file:
         print("▶ Playing Audio...")
         play_audio(audio_file)
     else:
-        print("❌ Audio generation failed")
+        print("❌ Audio failed")
 
     print("✅ Done!")
 
 
 # Run
 if __name__ == "__main__":
+    if "--check-key" in sys.argv:
+        check_openrouter_key()
+        sys.exit(0)
     main()
