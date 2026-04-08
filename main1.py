@@ -1,249 +1,295 @@
-import tkinter as tk
-from tkinter import filedialog
-import os
-import sys
-import pytesseract
 import cv2
-import re
+import pytesseract
+import numpy as np
+import time
 import requests
+import re
+import os
 from gtts import gTTS
 import pygame
-import time
 
-def load_dotenv(path=".env"):
-    if not os.path.exists(path):
+# ---------------- CONFIG ----------------
+pytesseract.pytesseract.tesseract_cmd = r"C:\Tesseract-OCR\tesseract.exe"
+OPENROUTER_API_KEY = "YOUR_OPENROUTER_KEY"
+
+# ---------------- AUDIO CONTROL ----------------
+last_audio_time = 0
+
+def play_audio(text, filename, lang='en', wait=True):
+    global last_audio_time
+
+    if not text.strip():
+        return
+
+    # 🔥 prevent spam
+    if time.time() - last_audio_time < 2:
         return
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw_line in f:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
+        last_audio_time = time.time()
+
+        # 🔥 stop previous audio
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+        except:
+            pass
+
+        time.sleep(0.2)
+
+        # 🔥 delete file safely
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except:
+                pass
+
+        gTTS(text=text, lang=lang).save(filename)
+
+        pygame.mixer.init()
+        pygame.mixer.music.load(filename)
+        pygame.mixer.music.play()
+
+        if wait:
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.3)
+
     except Exception as e:
-        print("⚠ Could not read .env:", e)
+        print("❌ Audio error:", e)
 
-
-load_dotenv()
-
-# 🔴 Tesseract Path
-pytesseract.pytesseract.tesseract_cmd = r"C:\Tesseract-OCR\tesseract.exe"
-
-# 🔴 OPENROUTER API KEY
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-
-
-def check_openrouter_key():
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost",
-        "X-Title": "OCR LLM Project"
-    }
-    data = {
-        "model": "openrouter/auto",
-        "messages": [{"role": "user", "content": "Reply only with: OK"}],
-        "max_tokens": 5,
-    }
-
-    if not OPENROUTER_API_KEY:
-        print("❌ OPENROUTER_API_KEY not set")
-        return False
-
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=15)
-        if response.status_code == 200:
-            print("✅ OpenRouter key is working")
-            return True
-
-        print(f"❌ OpenRouter key check failed ({response.status_code})")
-        print(response.text)
-        return False
-    except Exception as e:
-        print("❌ Key check error:", e)
-        return False
-
-
-# -------------------------------
-# 1. Select Image
-# -------------------------------
-def select_image():
-    root = tk.Tk()
-    root.withdraw()
-    return filedialog.askopenfilename(
-        title="Select Image",
-        filetypes=[("Image Files", "*.png *.jpg *.jpeg")]
-    )
-
-
-# -------------------------------
-# 2. Preprocess Image
-# -------------------------------
-def preprocess_image(path):
-    img = cv2.imread(path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.resize(gray, None, fx=1.5, fy=1.5)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    return thresh
-
-
-# -------------------------------
-# 3. OCR
-# -------------------------------
-def extract_text(image):
-    return pytesseract.image_to_string(image, lang='eng+tam')
-
-
-# -------------------------------
-# 4. Clean Text
-# -------------------------------
+# ---------------- CLEAN TEXT ----------------
 def clean_text(text):
+    text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'[^\u0B80-\u0BFFA-Za-z0-9.,!? ]+', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def is_valid_text(text):
+    return len(text.split()) > 8
 
-# -------------------------------
-# 5. LLM SUMMARY (OpenRouter)
-# -------------------------------
-def llm_summary(text):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost",
-        "X-Title": "OCR LLM Project"
-    }
-
-    prompt = f"""
-Summarize the following text clearly and shortly.
-If the text is Tamil, keep summary in Tamil.
-
-Text:
-{text}
-"""
-
-    data = {
-        "model": "openrouter/auto",   # 🔥 FIXED
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 150
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=20)
-
-        if response.status_code != 200:
-            print("❌ LLM API Error:", response.text)
-            return None
-
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-
-    except Exception as e:
-        print("❌ LLM Error:", str(e))
-        return None
-
-# -------------------------------
-# 6. Basic Summary (Fallback)
-# -------------------------------
-def basic_summary(text):
-    sentences = text.split('.')
-    summary = '.'.join(sentences[:2])
-    return summary[:300]
-
-
-# -------------------------------
-# 7. Language Detection
-# -------------------------------
 def detect_language(text):
     if any('\u0B80' <= c <= '\u0BFF' for c in text):
-        return "ta"
-    return "en"
+        return 'ta'
+    return 'en'
 
-
-# -------------------------------
-# 8. Text to Speech
-# -------------------------------
-def generate_audio(text, lang):
-    file = "output.mp3"
+# ---------------- LLM ----------------
+def llm_summary(text):
     try:
-        gTTS(text=text, lang=lang).save(file)
-        return file
-    except Exception as e:
-        print("❌ Audio Error:", e)
+        res = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "Smart Camera AI"
+            },
+            json={
+                "model": "openrouter/auto",
+                "messages": [{"role": "user", "content": f"Summarize:\n{text}"}],
+                "max_tokens": 120
+            },
+            timeout=15
+        )
+        if res.status_code == 200:
+            return res.json()["choices"][0]["message"]["content"]
+    except:
+        pass
+    return None
+
+# ---------------- BLUR ----------------
+def is_blurry(gray):
+    return cv2.Laplacian(gray, cv2.CV_64F).var() < 80
+
+# ---------------- PAGE DETECTION ----------------
+def detect_page(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray, alpha=1.8, beta=30)
+
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    edges = cv2.Canny(blur, 30, 200)
+
+    edges = cv2.dilate(edges, None, iterations=2)
+    edges = cv2.erode(edges, None, iterations=1)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
         return None
 
+    largest = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(largest)
 
-# -------------------------------
-# 9. Play Audio
-# -------------------------------
-def play_audio(file):
-    pygame.init()
-    pygame.mixer.init()
-    pygame.mixer.music.load(file)
-    pygame.mixer.music.play()
+    if w*h < 30000:
+        return None
 
-    while pygame.mixer.music.get_busy():
-        time.sleep(0.5)
+    return (x, y, w, h)
 
+# ---------------- SAME PAGE ----------------
+def is_same_page(prev, curr):
+    if prev is None:
+        return False
 
-# -------------------------------
-# MAIN
-# -------------------------------
+    prev = cv2.resize(prev, (200,200))
+    curr = cv2.resize(curr, (200,200))
+
+    diff = np.mean(cv2.absdiff(prev, curr))
+    return diff < 15
+
+# ---------------- MAIN ----------------
 def main():
-    print("📂 Select Image")
-    path = select_image()
+    cap = cv2.VideoCapture(0)
 
-    if not path:
-        print("❌ No file selected")
-        return
+    prev_page = None
+    state = "READY"
 
-    print("🖼 Processing...")
-    image = preprocess_image(path)
+    stable_start = None
+    last_capture = 0
+    cooldown = 4
 
-    print("🔍 OCR Running...")
-    text = extract_text(image)
-    print("\n📄 Raw Text:\n", text)
+    last_guidance = ""
 
-    clean = clean_text(text)
-    print("\n🧹 Clean Text:\n", clean)
+    print("📷 Smart AI Camera Started (Press Q to Exit)")
 
-    print("\n🧠 Generating Smart Summary (LLM)...")
-    final_text = llm_summary(clean)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    # 🔥 fallback
-    if not final_text:
-        print("⚠ LLM failed, using basic summary")
-        final_text = basic_summary(clean)
+        display = frame.copy()
+        page = detect_page(frame)
 
-    print("\n📝 Final Summary:\n", final_text)
+        if page:
+            x, y, w, h = page
+            cv2.rectangle(display, (x,y), (x+w,y+h), (0,255,0), 2)
 
-    lang = detect_language(final_text)
-    print("\n🌍 Language:", lang)
+            roi = frame[y:y+h, x:x+w]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    audio_file = generate_audio(final_text, lang)
+            # -------- GUIDANCE --------
+            center_x = x + w//2
+            center_y = y + h//2
 
-    if audio_file:
-        print("▶ Playing Audio...")
-        play_audio(audio_file)
-    else:
-        print("❌ Audio failed")
+            frame_cx = frame.shape[1]//2
+            frame_cy = frame.shape[0]//2
 
-    print("✅ Done!")
+            frame_area = frame.shape[0] * frame.shape[1]
+            page_area = w * h
 
+            message = ""
 
-# Run
+            if center_x < frame_cx - 80:
+                message = "Move Right"
+            elif center_x > frame_cx + 80:
+                message = "Move Left"
+            elif center_y < frame_cy - 80:
+                message = "Move Down"
+            elif center_y > frame_cy + 80:
+                message = "Move Up"
+            elif page_area < frame_area * 0.3:
+                message = "Move Closer"
+            elif page_area > frame_area * 0.9:
+                message = "Move Back"
+            elif is_blurry(gray):
+                message = "Hold Steady, Not Clear"
+
+            if message != "":
+                stable_start = None
+                cv2.putText(display, message, (30,50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+
+                if message != last_guidance:
+                    print("🔊 Guide:", message)
+                    play_audio(message, "guide_audio.mp3", "en", wait=False)
+                    last_guidance = message
+            else:
+                last_guidance = ""
+
+                # -------- STABLE --------
+                if stable_start is None:
+                    stable_start = time.time()
+
+                elapsed = time.time() - stable_start
+
+                cv2.putText(display, f"Hold Still: {int(elapsed)}s",
+                            (30,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+                # -------- CAPTURE --------
+                if elapsed >= 2 and time.time() - last_capture > cooldown:
+
+                    print("📸 Capturing page...")
+                    stable_start = None
+                    last_capture = time.time()
+
+                    center = roi[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+
+                    if is_same_page(prev_page, center):
+                        print("⚠ Same page")
+                        play_audio("Please move to next page", "guide_audio.mp3")
+                        state = "WAIT_NEW"
+                        continue
+
+                    prev_page = center.copy()
+
+                    # OCR
+                    proc = cv2.adaptiveThreshold(
+                        gray, 255,
+                        cv2.ADAPTIVE_THRESH_MEAN_C,
+                        cv2.THRESH_BINARY,
+                        15, 5
+                    )
+
+                    text = pytesseract.image_to_string(proc, lang='eng+tam')
+                    clean = clean_text(text)
+
+                    if not is_valid_text(clean):
+                        print("❌ Text not clear")
+                        play_audio("Text not clear adjust page", "guide_audio.mp3")
+                        continue
+
+                    print("\n📄 Text:", clean[:200])
+
+                    summary = llm_summary(clean)
+                    if not summary:
+                        summary = clean[:200]
+
+                    print("\n📝 Summary:", summary)
+
+                    lang = detect_language(summary)
+                    play_audio(summary, "read_audio.mp3", lang)
+
+                    print("📖 Done. Show next page.")
+                    play_audio("Reading complete show next page", "guide_audio.mp3")
+
+                    state = "WAIT_NEW"
+
+        else:
+            stable_start = None
+            cv2.putText(display, "Show Page", (30,50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+
+            if last_guidance != "Show page":
+                play_audio("Show page to camera", "guide_audio.mp3", wait=False)
+                last_guidance = "Show page"
+
+        # -------- WAIT NEW PAGE --------
+        if state == "WAIT_NEW" and page:
+            center = roi[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+            if not is_same_page(prev_page, center):
+                print("✅ New page detected")
+                play_audio("New page detected", "guide_audio.mp3")
+                state = "READY"
+
+        cv2.imshow("Smart AI Reader", display)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("🛑 Stopping...")
+            play_audio("Stopping system", "guide_audio.mp3")
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    pygame.mixer.quit()
+
+# ---------------- RUN ----------------
 if __name__ == "__main__":
-    if "--check-key" in sys.argv:
-        check_openrouter_key()
-        sys.exit(0)
     main()
